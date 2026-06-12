@@ -104,15 +104,47 @@ function DropdownItem({ label, selected, onClick }) {
   );
 }
 
+const _modelCostCache = new Map();
+let _costCacheFetched = false;
+async function ensureCostCache() {
+  if (_costCacheFetched) return;
+  _costCacheFetched = true;
+  try {
+    const res = await fetch("https://api.muapi.ai/api/v1/models");
+    if (!res.ok) return;
+    const list = await res.json();
+    const arr = Array.isArray(list) ? list : list.models || list.data || [];
+    arr.forEach((m) => { if (m.name && m.cost != null) _modelCostCache.set(m.name, m.cost); });
+  } catch { /* non-fatal */ }
+}
+
+function getMaxDuration(model) {
+  const d = model?.inputs?.duration;
+  if (!d) return null;
+  if (d.enum) return Math.max(...d.enum);
+  if (d.maxValue != null) return d.maxValue;
+  return d.default ?? null;
+}
+
+const DUR_FILTERS = [0, 10, 15, 30, 60, 120];
+
 function ModelDropdown({ imageMode, selectedModel, onSelect, onClose }) {
   const [search, setSearch] = useState("");
+  const [minDur, setMinDur] = useState(0);
+  const [, forceUpdate] = useState(0);
+
+  useEffect(() => {
+    ensureCostCache().then(() => forceUpdate((n) => n + 1));
+  }, []);
 
   const generationModels = imageMode ? i2vModels : t2vModels;
 
   const lf = search.toLowerCase();
-  const filteredMain = generationModels.filter(
-    (m) => m.name.toLowerCase().includes(lf) || m.id.toLowerCase().includes(lf),
-  );
+  const filteredMain = generationModels.filter((m) => {
+    const textMatch = m.name.toLowerCase().includes(lf) || m.id.toLowerCase().includes(lf);
+    const durMatch = !minDur || (getMaxDuration(m) ?? 0) >= minDur;
+    return textMatch && durMatch;
+  });
   const filteredV2V = v2vModels.filter(
     (m) => m.name.toLowerCase().includes(lf) || m.id.toLowerCase().includes(lf),
   );
@@ -125,50 +157,46 @@ function ModelDropdown({ imageMode, selectedModel, onSelect, onClose }) {
     return "bg-primary/10 text-primary";
   };
 
-  const renderItem = (m, isV2V = false) => (
-    <div
-      key={m.id}
-      className={`flex items-center justify-between p-3.5 hover:bg-white/5 rounded-2xl cursor-pointer transition-all border border-transparent hover:border-white/5 ${selectedModel === m.id ? "bg-white/5 border-white/5" : ""}`}
-      onClick={(e) => {
-        e.stopPropagation();
-        onSelect(m, isV2V);
-        onClose();
-      }}
-    >
-      <div className="flex items-center gap-3.5">
-        <div
-          className={`w-10 h-10 ${getIconColor(m, isV2V)} border border-white/5 rounded-xl flex items-center justify-center font-black text-sm shadow-inner uppercase`}
-        >
-          {m.name.charAt(0)}
+  const renderItem = (m, isV2V = false) => {
+    const maxDur = getMaxDuration(m);
+    const cost = _modelCostCache.get(m.id);
+    return (
+      <div
+        key={m.id}
+        className={`flex items-center justify-between p-3.5 hover:bg-white/5 rounded-2xl cursor-pointer transition-all border border-transparent hover:border-white/5 ${selectedModel === m.id ? "bg-white/5 border-white/5" : ""}`}
+        onClick={(e) => { e.stopPropagation(); onSelect(m, isV2V); onClose(); }}
+      >
+        <div className="flex items-center gap-3.5 min-w-0">
+          <div className={`w-10 h-10 shrink-0 ${getIconColor(m, isV2V)} border border-white/5 rounded-xl flex items-center justify-center font-black text-sm shadow-inner uppercase`}>
+            {m.name.charAt(0)}
+          </div>
+          <div className="flex flex-col gap-0.5 min-w-0">
+            <span className="text-xs font-bold text-white tracking-tight truncate">{m.name}</span>
+            {isV2V && (
+              <span className="text-[9px] text-orange-400/70">
+                {m.imageField ? "Upload a video and image" : "Upload a video to use"}
+              </span>
+            )}
+            <div className="flex gap-1 mt-0.5">
+              {maxDur != null && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-muted">up to {maxDur}s</span>
+              )}
+              {cost != null && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-bold">${cost.toFixed(cost < 0.1 ? 3 : 2)}</span>
+              )}
+            </div>
+          </div>
         </div>
-        <div className="flex flex-col gap-0.5">
-          <span className="text-xs font-bold text-white tracking-tight">
-            {m.name}
-          </span>
-          {isV2V && (
-            <span className="text-[9px] text-orange-400/70">
-              {m.imageField ? "Upload a video and image" : "Upload a video to use"}
-            </span>
-          )}
-        </div>
+        {selectedModel === m.id && <CheckSvg />}
       </div>
-      {selectedModel === m.id && <CheckSvg />}
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="flex flex-col h-full max-h-[70vh]">
-      <div className="px-2 pb-3 mb-2 border-b border-white/5 shrink-0">
-        <div className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-2.5 border border-white/5 focus-within:border-primary/50 transition-colors">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="3"
-            className="text-muted"
-          >
+      <div className="px-2 pb-2 mb-1 border-b border-white/5 shrink-0">
+        <div className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-2.5 border border-white/5 focus-within:border-primary/50 transition-colors mb-2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-muted">
             <circle cx="11" cy="11" r="8" />
             <path d="M21 21l-4.35-4.35" />
           </svg>
@@ -181,17 +209,28 @@ function ModelDropdown({ imageMode, selectedModel, onSelect, onClose }) {
             className="bg-transparent border-none text-xs text-white focus:ring-0 w-full p-0 outline-none"
           />
         </div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-[9px] text-muted uppercase tracking-widest mr-1">Duration</span>
+          {DUR_FILTERS.map((s) => (
+            <button
+              key={s}
+              onClick={(e) => { e.stopPropagation(); setMinDur(s); }}
+              className={`text-[10px] px-2 py-0.5 rounded-full border transition-all ${minDur === s ? "border-primary/60 bg-primary/10 text-primary" : "border-white/10 text-muted hover:border-white/30"}`}
+            >
+              {s === 0 ? "Any" : `${s}s+`}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="text-xs font-bold text-secondary px-3 py-2 shrink-0">
-        Video models
-      </div>
+      <div className="text-xs font-bold text-secondary px-3 py-2 shrink-0">Video models</div>
       <div className="flex flex-col gap-1.5 overflow-y-auto custom-scrollbar pr-1 pb-2">
+        {filteredMain.length === 0 && (
+          <div className="text-xs text-muted text-center py-6">No models match this filter</div>
+        )}
         {filteredMain.map((m) => renderItem(m, false))}
         {filteredV2V.length > 0 && (
           <>
-            <div className="text-xs font-bold text-orange-400/70 px-3 py-2 mt-1 border-t border-white/5">
-              Video Tools
-            </div>
+            <div className="text-xs font-bold text-orange-400/70 px-3 py-2 mt-1 border-t border-white/5">Video Tools</div>
             {filteredV2V.map((m) => renderItem(m, true))}
           </>
         )}
@@ -289,8 +328,48 @@ export default function VideoStudio({
   const [videoUploading, setVideoUploading] = useState(false);
   const [uploadedVideoName, setUploadedVideoName] = useState(null);
 
+  // ── cost estimate ──
+  const [costEstimate, setCostEstimate] = useState(null);
+  useEffect(() => {
+    setCostEstimate(null);
+    const t = setTimeout(async () => {
+      try {
+        const body = {};
+        if (selectedDuration) body.duration = selectedDuration;
+        if (selectedResolution) body.resolution = selectedResolution;
+        const res = await fetch(`https://api.muapi.ai/api/v1/models/${selectedModel}/estimate-cost`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          // fall back to cached base cost
+          await ensureCostCache();
+          const base = _modelCostCache.get(selectedModel);
+          if (base != null) setCostEstimate(base);
+          return;
+        }
+        const data = await res.json();
+        const cost = data.cost ?? data.amount_usd ?? data.estimated_cost;
+        if (cost != null) setCostEstimate(Number(cost));
+        else {
+          await ensureCostCache();
+          const base = _modelCostCache.get(selectedModel);
+          if (base != null) setCostEstimate(base);
+        }
+      } catch {
+        await ensureCostCache();
+        const base = _modelCostCache.get(selectedModel);
+        if (base != null) setCostEstimate(base);
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [selectedModel, selectedDuration, selectedResolution]);
+
   // ── generation / canvas ──
   const [generating, setGenerating] = useState(false);
+  const [genElapsed, setGenElapsed] = useState(0);
+  const [genFull, setGenFull] = useState(false);
   const [generateError, setGenerateError] = useState(null);
   const [fullscreenUrl, setFullscreenUrl] = useState(null);
   const [canvasUrl, setCanvasUrl] = useState(null);
@@ -319,6 +398,8 @@ export default function VideoStudio({
   const videoFileInputRef = useRef(null);
   const resultVideoRef = useRef(null);
   const hasRestored = useRef(false);
+  const genTimerRef = useRef(null);
+  const genWasActiveRef = useRef(false);
 
   // ── derived data ──
   const history = historyItems ?? localHistory;
@@ -657,6 +738,25 @@ export default function VideoStudio({
     return () => window.removeEventListener("click", handler);
   }, [openDropdown]);
 
+  // ── generation progress timer ─────────────────────────────────────────────
+  useEffect(() => {
+    if (generating) {
+      genWasActiveRef.current = true;
+      setGenElapsed(0);
+      setGenFull(false);
+      genTimerRef.current = setInterval(() => {
+        setGenElapsed((e) => e + 1);
+      }, 1000);
+      return () => clearInterval(genTimerRef.current);
+    } else if (genWasActiveRef.current) {
+      genWasActiveRef.current = false;
+      clearInterval(genTimerRef.current);
+      setGenFull(true);
+      const t = setTimeout(() => setGenFull(false), 700);
+      return () => clearTimeout(t);
+    }
+  }, [generating]);
+
   // ── textarea auto-resize ──────────────────────────────────────────────────
   const handlePromptInput = (e) => {
     setPrompt(e.target.value);
@@ -881,6 +981,11 @@ export default function VideoStudio({
   const addToLocalHistory = useCallback((entry) => {
     setLocalHistory((prev) => [entry, ...prev].slice(0, 30));
     setActiveHistoryIdx(0);
+  }, []);
+
+  // ── remove from local history ─────────────────────────────────────────────
+  const removeFromLocalHistory = useCallback((id) => {
+    setLocalHistory((prev) => prev.filter((e) => e.id !== id));
   }, []);
 
   // ── show result in canvas ─────────────────────────────────────────────────
@@ -1154,6 +1259,14 @@ export default function VideoStudio({
   const currentModelObj = getCurrentModel();
   const isExtendMode = currentModelObj?.requiresRequestId;
 
+  const GEN_EST_SECS = { "seedance-lite": 40, "seedance-v2.0-t2v": 70, "seedance-v2.0-i2v": 70 };
+  const genEstSecs = GEN_EST_SECS[selectedModel] ?? 60;
+  const genPct = genFull ? 100 : Math.min(90, Math.round((genElapsed / genEstSecs) * 90));
+  const showProgress = generating || genFull;
+  const genM = Math.floor(genElapsed / 60);
+  const genS = genElapsed % 60;
+  const genTimeLabel = `${genM > 0 ? genM + "m " : ""}${genS}s`;
+
   const promptPlaceholder = v2vMode
     ? currentModelObj?.imageField
       ? currentModelObj?.promptRequired
@@ -1232,6 +1345,22 @@ export default function VideoStudio({
                     >
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                         <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      title="Remove from history"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeFromLocalHistory(entry.id);
+                      }}
+                      className="p-2 bg-black/60 backdrop-blur-md rounded-full text-white hover:bg-red-500 hover:text-white transition-all border border-white/10"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+                        <path d="M10 11v6M14 11v6" />
+                        <path d="M9 6V4h6v2" />
                       </svg>
                     </button>
                     {isSeedance2 && (
@@ -1884,28 +2013,51 @@ export default function VideoStudio({
             </div>
 
             {/* Generate button */}
-            <button
-              type="button"
-              onClick={handleGenerate}
-              disabled={generating}
-              className="bg-[#22d3ee] text-black px-4 py-2 rounded-md font-medium text-sm hover:bg-[#e5ff33] hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 w-full sm:w-auto shadow-lg shadow-[#22d3ee]/10 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {generating ? (
-                <>
-                  <span className="animate-spin inline-block text-black">
-                    ◌
-                  </span>{" "}
-                  Generating...
-                </>
-              ) : generateError ? (
-                `Error: ${generateError}`
-              ) : (
-                <>
-                  <span>Generate</span>
-                </>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              {costEstimate != null && !generating && !generateError && (
+                <span className="text-xs font-bold text-primary/80 tabular-nums whitespace-nowrap">
+                  ~${costEstimate.toFixed(costEstimate < 0.1 ? 3 : 2)}
+                </span>
               )}
-            </button>
+              <button
+                type="button"
+                onClick={handleGenerate}
+                disabled={generating}
+                className="bg-[#22d3ee] text-black px-4 py-2 rounded-md font-medium text-sm hover:bg-[#e5ff33] hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2 w-full sm:w-auto shadow-lg shadow-[#22d3ee]/10 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {generating ? (
+                  <>
+                    <span className="animate-spin inline-block text-black">◌</span>{" "}
+                    Generating...
+                  </>
+                ) : generateError ? (
+                  `Error: ${generateError}`
+                ) : (
+                  <span>Generate</span>
+                )}
+              </button>
+            </div>
           </div>
+
+          {/* Generation progress bar */}
+          {showProgress && (
+            <div className="px-1 pb-1 pt-1 flex flex-col gap-0.5">
+              <div className="w-full h-[3px] bg-white/10 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full"
+                  style={{
+                    width: `${genPct}%`,
+                    transition: genFull ? "width 0.3s ease" : genElapsed > 0 ? "width 1s linear" : "none",
+                  }}
+                />
+              </div>
+              {genElapsed > 0 && (
+                <span className="text-[10px] text-muted text-right tabular-nums block">
+                  {genTimeLabel}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

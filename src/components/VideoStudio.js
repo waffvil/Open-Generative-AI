@@ -7,6 +7,30 @@ import { savePendingJob, removePendingJob, getPendingJobs } from '../lib/pending
 import { localAI, isLocalAIAvailable } from '../lib/localInferenceClient.js';
 import { isWan2gpModelId, getLocalModelById, localT2VModels, localI2VModels } from '../lib/localModels.js';
 
+// Cost cache: model-id → USD float, populated once from the public Muapi catalog.
+const _modelCostCache = new Map();
+let _costCacheFetched = false;
+async function ensureCostCache() {
+    if (_costCacheFetched) return;
+    _costCacheFetched = true;
+    try {
+        const res = await fetch('https://api.muapi.ai/api/v1/models');
+        if (!res.ok) return;
+        const list = await res.json();
+        const arr = Array.isArray(list) ? list : (list.models || list.data || []);
+        arr.forEach(m => { if (m.name && m.cost != null) _modelCostCache.set(m.name, m.cost); });
+    } catch { /* non-fatal */ }
+}
+
+// Returns max duration in seconds from a model's inputs descriptor.
+function getMaxDuration(model) {
+    const d = model?.inputs?.duration;
+    if (!d) return null;
+    if (d.enum) return Math.max(...d.enum);
+    if (d.maxValue != null) return d.maxValue;
+    return d.default ?? null;
+}
+
 // Promotes a wan2gp catalog entry (lib/localModels.js shape) into the
 // `inputs`-shaped descriptor the Video Studio dropdowns/controls expect.
 const adaptLocalToVideoEntry = (m) => ({
@@ -443,6 +467,18 @@ export function VideoStudio() {
     bottomRow.appendChild(controlsLeft);
     bottomRow.appendChild(generateBtn);
     bar.appendChild(bottomRow);
+
+    // Progress bar (shown during generation)
+    const progressWrap = document.createElement('div');
+    progressWrap.className = 'hidden px-2 pb-3 pt-2 flex-col gap-1';
+    progressWrap.innerHTML = `
+        <div class="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+            <div id="gen-progress-fill" class="h-full bg-primary rounded-full transition-none" style="width:0%"></div>
+        </div>
+        <div id="gen-progress-label" class="text-xs text-muted text-right tabular-nums"></div>
+    `;
+    bar.appendChild(progressWrap);
+
     promptWrapper.appendChild(bar);
     container.appendChild(promptWrapper);
 
@@ -554,10 +590,17 @@ export function VideoStudio() {
             dropdown.classList.remove('max-w-[240px]', 'max-w-[200px]');
             dropdown.innerHTML = `
                 <div class="flex flex-col h-full max-h-[70vh]">
-                    <div class="px-2 pb-3 mb-2 border-b border-white/5 shrink-0">
-                        <div class="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-2.5 border border-white/5 focus-within:border-primary/50 transition-colors">
+                    <div class="px-2 pb-2 mb-1 border-b border-white/5 shrink-0">
+                        <div class="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-2.5 border border-white/5 focus-within:border-primary/50 transition-colors mb-2">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" class="text-muted"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
                             <input type="text" id="v-model-search" placeholder="${t('common.searchModels')}" class="bg-transparent border-none text-xs text-white focus:ring-0 w-full p-0">
+                        </div>
+                        <div class="flex items-center gap-1.5 flex-wrap">
+                            <span class="text-[9px] text-muted uppercase tracking-widest mr-1">Duration</span>
+                            ${[0, 10, 15, 30, 60, 120].map(s => `
+                                <button data-dur="${s}" class="dur-chip text-[10px] px-2 py-0.5 rounded-full border transition-all ${s === 0 ? 'border-primary/60 bg-primary/10 text-primary' : 'border-white/10 text-muted hover:border-white/30'}">
+                                    ${s === 0 ? 'Any' : s + 's+'}
+                                </button>`).join('')}
                         </div>
                     </div>
                     <div class="text-[10px] font-bold text-secondary uppercase tracking-widest px-3 py-2 shrink-0">Video models</div>
@@ -565,20 +608,30 @@ export function VideoStudio() {
                 </div>
             `;
             const list = dropdown.querySelector('#v-model-list-container');
+            ensureCostCache().then(() => renderModels(searchInput?.value || '', activeDurFilter));
+            let activeDurFilter = 0;
 
             const makeModelItem = (m, isV2V = false) => {
                 const item = document.createElement('div');
                 item.className = `flex items-center justify-between p-3.5 hover:bg-white/5 rounded-2xl cursor-pointer transition-all border border-transparent hover:border-white/5 ${selectedModel === m.id ? 'bg-white/5 border-white/5' : ''}`;
                 const iconColor = isV2V ? 'bg-orange-500/10 text-orange-400' : m.id.includes('kling') ? 'bg-blue-500/10 text-blue-400' : m.id.includes('veo') ? 'bg-purple-500/10 text-purple-400' : m.id.includes('sora') ? 'bg-rose-500/10 text-rose-400' : 'bg-primary/10 text-primary';
+                const maxDur = getMaxDuration(m);
+                const cost = _modelCostCache.get(m.id);
+                const durLabel = maxDur != null ? `up to ${maxDur}s` : '';
+                const costLabel = cost != null ? `$${cost % 1 === 0 ? cost.toFixed(2) : cost % 0.01 === 0 ? cost.toFixed(2) : cost.toFixed(3)}` : '';
                 item.innerHTML = `
-                    <div class="flex items-center gap-3.5">
-                         <div class="w-10 h-10 ${iconColor} border border-white/5 rounded-xl flex items-center justify-center font-black text-sm shadow-inner uppercase">${m.name.charAt(0)}</div>
-                         <div class="flex flex-col gap-0.5">
-                            <span class="text-xs font-bold text-white tracking-tight">${m.name}</span>
+                    <div class="flex items-center gap-3.5 min-w-0">
+                         <div class="w-10 h-10 shrink-0 ${iconColor} border border-white/5 rounded-xl flex items-center justify-center font-black text-sm shadow-inner uppercase">${m.name.charAt(0)}</div>
+                         <div class="flex flex-col gap-0.5 min-w-0">
+                            <span class="text-xs font-bold text-white tracking-tight truncate">${m.name}</span>
                             ${isV2V ? `<span class="text-[9px] text-orange-400/70">${m.imageField ? 'Upload a video and image' : 'Upload a video to use'}</span>` : ''}
+                            <div class="flex gap-1 mt-0.5">
+                                ${durLabel ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-white/5 text-muted">${durLabel}</span>` : ''}
+                                ${costLabel ? `<span class="text-[9px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-bold">${costLabel}</span>` : ''}
+                            </div>
                          </div>
                     </div>
-                    ${selectedModel === m.id ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" stroke-width="4"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+                    ${selectedModel === m.id ? '<svg class="shrink-0" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" stroke-width="4"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
                 `;
                 item.onclick = (e) => {
                     e.stopPropagation();
@@ -624,17 +677,30 @@ export function VideoStudio() {
                 return item;
             };
 
-            const renderModels = (filter = '') => {
+            const renderModels = (filter = '', minDur = 0) => {
                 list.innerHTML = '';
                 const lf = filter.toLowerCase();
+
+                const matchesDur = (m) => {
+                    if (!minDur) return true;
+                    const max = getMaxDuration(m);
+                    return max != null && max >= minDur;
+                };
 
                 // Regular generation models (always t2v or i2v, never v2v)
                 const generationModels = imageMode ? allI2V : allT2V;
                 const filteredMain = generationModels
-                    .filter(m => m.name.toLowerCase().includes(lf) || m.id.toLowerCase().includes(lf));
+                    .filter(m => (m.name.toLowerCase().includes(lf) || m.id.toLowerCase().includes(lf)) && matchesDur(m));
                 filteredMain.forEach(m => list.appendChild(makeModelItem(m, false)));
 
-                // Video Tools section
+                if (!filteredMain.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'text-xs text-muted text-center py-6';
+                    empty.textContent = 'No models match this filter';
+                    list.appendChild(empty);
+                }
+
+                // Video Tools section (no duration filter applied — v2v tools don't expose duration)
                 const filteredV2V = v2vModels.filter(m => m.name.toLowerCase().includes(lf) || m.id.toLowerCase().includes(lf));
                 if (filteredV2V.length > 0) {
                     const sectionLabel = document.createElement('div');
@@ -648,7 +714,24 @@ export function VideoStudio() {
             renderModels();
             const searchInput = dropdown.querySelector('#v-model-search');
             searchInput.onclick = (e) => e.stopPropagation();
-            searchInput.oninput = (e) => renderModels(e.target.value);
+            searchInput.oninput = (e) => renderModels(e.target.value, activeDurFilter);
+
+            // Duration filter chips
+            dropdown.querySelectorAll('.dur-chip').forEach(chip => {
+                chip.onclick = (e) => {
+                    e.stopPropagation();
+                    activeDurFilter = parseInt(chip.dataset.dur, 10);
+                    dropdown.querySelectorAll('.dur-chip').forEach(c => {
+                        const active = c === chip;
+                        c.classList.toggle('border-primary/60', active);
+                        c.classList.toggle('bg-primary/10', active);
+                        c.classList.toggle('text-primary', active);
+                        c.classList.toggle('border-white/10', !active);
+                        c.classList.toggle('text-muted', !active);
+                    });
+                    renderModels(searchInput?.value || '', activeDurFilter);
+                };
+            });
 
         } else if (type === 'ar') {
             dropdown.classList.add('max-w-[240px]');
@@ -1130,6 +1213,43 @@ export function VideoStudio() {
         generateBtn.disabled = true;
         generateBtn.innerHTML = `<span class="animate-spin inline-block mr-2 text-black">◌</span> ${t('common.generating')}`;
 
+        // Progress bar
+        const fill = progressWrap.querySelector('#gen-progress-fill');
+        const label = progressWrap.querySelector('#gen-progress-label');
+        const estSeconds = { 'seedance-lite': 40, 'seedance-v2.0-t2v': 70, 'seedance-v2.0-i2v': 70 }[selectedModel] ?? 60;
+        let elapsed = 0;
+        progressWrap.classList.remove('hidden');
+        progressWrap.classList.add('flex');
+        fill.style.transition = 'none';
+        fill.style.width = '0%';
+        const progressTimer = setInterval(() => {
+            elapsed++;
+            const pct = Math.min(90, Math.round((elapsed / estSeconds) * 90));
+            fill.style.transition = 'width 1s linear';
+            fill.style.width = pct + '%';
+            const m = Math.floor(elapsed / 60);
+            const s = elapsed % 60;
+            label.textContent = `${m > 0 ? m + 'm ' : ''}${s}s`;
+        }, 1000);
+        const stopProgress = (done) => {
+            clearInterval(progressTimer);
+            if (done) {
+                fill.style.transition = 'width 0.3s ease';
+                fill.style.width = '100%';
+                setTimeout(() => {
+                    progressWrap.classList.add('hidden');
+                    progressWrap.classList.remove('flex');
+                    fill.style.width = '0%';
+                    label.textContent = '';
+                }, 600);
+            } else {
+                progressWrap.classList.add('hidden');
+                progressWrap.classList.remove('flex');
+                fill.style.width = '0%';
+                label.textContent = '';
+            }
+        };
+
         // For local generations, surface step progress in the button label.
         let unsubscribeProgress = null;
         if (isLocal) {
@@ -1291,6 +1411,7 @@ export function VideoStudio() {
             }
         } catch (e) {
             hadError = true;
+            stopProgress(false);
             if (capturedRequestId) removePendingJob(capturedRequestId);
             console.error(e);
             // Restore hero so the page doesn't look broken after a failed generation
@@ -1303,7 +1424,10 @@ export function VideoStudio() {
             generateBtn.disabled = false;
             if (typeof unsubscribeProgress === 'function') unsubscribeProgress();
             // Only reset the label on success; the catch timeout handles the error case
-            if (!hadError) generateBtn.innerHTML = t('common.generate');
+            if (!hadError) {
+                stopProgress(true);
+                generateBtn.innerHTML = t('common.generate');
+            }
         }
     };
 
